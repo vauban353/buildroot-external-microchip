@@ -223,9 +223,9 @@
 	status = "okay";
 };
 
-//&pcie {
-//	status = "okay";
-//};
+&pcie {
+	status = "okay";
+};
 
 &qspi {
 	status = "okay";

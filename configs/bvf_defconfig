@@ -27,6 +27,7 @@ BR2_LINUX_KERNEL=y
 #BR2_LINUX_KERNEL_CUSTOM_REPO_VERSION="linux-5.15-mchp+fpga"
 BR2_LINUX_KERNEL_CUSTOM_TARBALL=y
 BR2_LINUX_KERNEL_CUSTOM_TARBALL_LOCATION="$(call github,linux4microchip,linux,linux-5.15-mchp+fpga)/linux-5.15-mchp+fpga.tar.gz"
+BR2_LINUX_KERNEL_PATCH="$(BR2_EXTERNAL_MCHP_PATH)/board/bboard/bvf/patches/linux/0001-PCIe-Change-controller-and-bridge-base-address.patch"
 # BR2_LINUX_KERNEL_DEFCONFIG="mpfs"
 BR2_LINUX_KERNEL_USE_CUSTOM_CONFIG=y
 BR2_LINUX_KERNEL_CUSTOM_CONFIG_FILE="$(BR2_EXTERNAL_MCHP_PATH)/board/bboard/bvf/linux.config"
