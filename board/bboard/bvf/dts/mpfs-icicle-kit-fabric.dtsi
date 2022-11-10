@@ -79,6 +79,24 @@
 		ngpios=<12>;
 	};
 
+	cape_pwm: pwm@41000000 {
+		compatible = "microchip,corepwm-rtl-v4";
+		reg = <0x0 0x41000000 0x0 0xF0>;
+		microchip,sync-update-mask = /bits/ 32 <0>;
+		#pwm-cells = <2>;
+		clocks = <&fabric_clk3>;
+//		status = "disabled";
+	};
+
+	cape_gpios: gpio@41100000 {
+		compatible = "microchip,core-gpio";
+		reg = <0x0 0x41100000 0x0 0x1000>;
+		clocks = <&fabric_clk3>;
+		gpio-controller;
+		#gpio-cells = <2>;
+		ngpios=<12>;
+	};
+
 	pcie: pcie@3000000000 {
 		compatible = "microchip,pcie-host-1.0";
 		#address-cells = <0x3>;
