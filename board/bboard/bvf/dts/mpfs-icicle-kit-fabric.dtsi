@@ -76,7 +76,7 @@
 		clocks = <&fabric_clk3>;
 		gpio-controller;
 		#gpio-cells = <2>;
-		ngpios=<12>;
+		ngpios=<32>;
 	};
 
 	cape_pwm: pwm@41000000 {
@@ -94,7 +94,7 @@
 		clocks = <&fabric_clk3>;
 		gpio-controller;
 		#gpio-cells = <2>;
-		ngpios=<12>;
+		ngpios=<32>;
 	};
 
 	pcie: pcie@3000000000 {
