@@ -1,31 +1,18 @@
-From a78e41f3e45204e3686ad7703d2f9135002afa20 Mon Sep 17 00:00:00 2001
+From 0371d006bc27a08817ecff25b664abbb812c4c93 Mon Sep 17 00:00:00 2001
 From: vauban353 <vauban353@gmail.com>
-Date: Sun, 6 Nov 2022 13:22:33 +0000
+Date: Sun, 27 Nov 2022 17:25:21 +0000
 Subject: [PATCH] GPIO: Add Microchip CoreGPIO driver.
 
 ---
- arch/riscv/configs/mpfs_amp_defconfig |   1 +
- arch/riscv/configs/mpfs_defconfig     |   1 +
- drivers/gpio/Kconfig                  |   7 +
- drivers/gpio/Makefile                 |   1 +
- drivers/gpio/gpio-microchip-core.c    | 319 ++++++++++++++++++++++++++
- 5 files changed, 329 insertions(+)
+ arch/riscv/configs/mpfs_defconfig  |   1 +
+ drivers/gpio/Kconfig               |   7 +
+ drivers/gpio/Makefile              |   1 +
+ drivers/gpio/gpio-microchip-core.c | 319 +++++++++++++++++++++++++++++
+ 4 files changed, 328 insertions(+)
  create mode 100644 drivers/gpio/gpio-microchip-core.c
 
-diff --git a/arch/riscv/configs/mpfs_amp_defconfig b/arch/riscv/configs/mpfs_amp_defconfig
-index 563abd8dba30..a4aa1e935220 100644
---- a/arch/riscv/configs/mpfs_amp_defconfig
-+++ b/arch/riscv/configs/mpfs_amp_defconfig
-@@ -57,6 +57,7 @@ CONFIG_SPI_SPIDEV=m
- CONFIG_GPIOLIB=y
- CONFIG_GPIO_SYSFS=y
- CONFIG_GPIO_POLARFIRE_SOC=y
-+CONFIG_GPIO_MICROCHIP_CORE=y
- CONFIG_PMBUS=m
- CONFIG_POWER_RESET=y
- CONFIG_MEDIA_SUPPORT=m
 diff --git a/arch/riscv/configs/mpfs_defconfig b/arch/riscv/configs/mpfs_defconfig
-index c26cbd0d2e29..3e29e2cc5578 100644
+index 0a36b9df6506..d176dc5e436b 100644
 --- a/arch/riscv/configs/mpfs_defconfig
 +++ b/arch/riscv/configs/mpfs_defconfig
 @@ -57,6 +57,7 @@ CONFIG_SPI_SPIDEV=m
