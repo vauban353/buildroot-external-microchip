@@ -154,9 +154,9 @@
 //	};
 //};
 
-&i2c2 {
-	status = "okay";
-};
+//&i2c2 {
+//	status = "okay";
+//};
 
 &mac0 {
 	status = "okay";
@@ -222,8 +222,19 @@
 	status = "okay";
 };
 
+
 &qspi {
 	status = "okay";
+
+	mcp3564: mcp3564@0{
+			compatible = "microchip,mcp3564r";
+			reg = <0>; /* CE0 */
+			spi-cpol;
+			spi-cpha;
+			spi-max-frequency = <15000000>;
+			status = "okay";
+			microchip,device-addr = <1>;
+	};
 };
 
 &refclk {
