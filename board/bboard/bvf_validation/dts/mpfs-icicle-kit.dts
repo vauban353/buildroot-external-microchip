@@ -229,9 +229,9 @@
 	status = "okay";
 };
 
-//&pcie {
-//	status = "okay";
-//};
+&pcie {
+	status = "okay";
+};
 
 
 //&{/soc} {
