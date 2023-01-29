@@ -1,0 +1,131 @@
+From ffc61609de475d1accd86d1e93c288eadb087899 Mon Sep 17 00:00:00 2001
+From: vauban353 <vauban353@gmail.com>
+Date: Wed, 7 Dec 2022 16:52:21 +0000
+Subject: [PATCH] Microchip QSPI: Add regular transfers.
+
+---
+ drivers/spi/spi-microchip-core-qspi.c | 97 +++++++++++++++++++++++++++
+ 1 file changed, 97 insertions(+)
+
+diff --git a/drivers/spi/spi-microchip-core-qspi.c b/drivers/spi/spi-microchip-core-qspi.c
+index 33c19b98b9e2..cac3cb665341 100644
+--- a/drivers/spi/spi-microchip-core-qspi.c
++++ b/drivers/spi/spi-microchip-core-qspi.c
+@@ -1,3 +1,4 @@
++
+ // SPDX-License-Identifier: (GPL-2.0)
+ /*
+  * Microchip coreQSPI QSPI controller driver
+@@ -497,6 +498,101 @@ static const struct spi_controller_mem_ops mchp_coreqspi_mem_ops = {
+ 	.exec_op = mchp_coreqspi_exec_op,
+ };
+ 
++static int mchp_coreqspi_transfer_one_message(struct spi_controller *ctlr,
++					struct spi_message *m)
++{
++	struct mchp_coreqspi *qspi = spi_controller_get_devdata(ctlr);
++	struct spi_transfer *t = NULL;
++	u32 control, frames, status;
++	u32 total_bytes, cmd_bytes = 0, idle_cycles = 0;
++	int ret;
++	bool quad = false, dual = false;
++
++	mutex_lock(&qspi->op_lock);
++	ret = readl_poll_timeout(qspi->regs + REG_STATUS, status,
++				 (status & STATUS_READY), 0,
++				 TIMEOUT_MS);
++	if (ret) {
++		dev_err(&ctlr->dev,
++			"Timeout waiting on QSPI ready.\n");
++		return -ETIMEDOUT;
++	}
++
++	ret = mchp_coreqspi_setup_clock(qspi, m->spi);
++	if (ret)
++		goto error;
++
++	control = readl_relaxed(qspi->regs + REG_CONTROL);
++	control &= ~(CONTROL_MODE12_MASK |
++		     CONTROL_MODE0);
++	writel_relaxed(control, qspi->regs + REG_CONTROL);
++
++	reinit_completion(&qspi->data_completion);
++
++	/* Check the total bytes and command bytes */
++	list_for_each_entry(t, &m->transfers, transfer_list) {
++		total_bytes += t->len;
++		if (!cmd_bytes)
++			cmd_bytes = t->len;
++		if (!t->rx_buf)
++			cmd_bytes = total_bytes;
++		if (t->tx_nbits == SPI_NBITS_QUAD || t->rx_nbits == SPI_NBITS_QUAD)
++			quad = true;
++		else if (t->tx_nbits == SPI_NBITS_DUAL || t->rx_nbits == SPI_NBITS_DUAL)
++			dual = true;
++	}
++
++	control = readl_relaxed(qspi->regs + REG_CONTROL);
++	if (quad) {
++		control |= (CONTROL_MODE0 | CONTROL_MODE12_EX_RW);
++	} else if (dual) {
++		control &= ~CONTROL_MODE0;
++		control |= CONTROL_MODE12_FULL;
++	} else {
++		control &= ~(CONTROL_MODE12_MASK |
++			     CONTROL_MODE0);
++	}
++
++	writel_relaxed(control, qspi->regs + REG_CONTROL);
++	frames = total_bytes & BYTESUPPER_MASK;
++	writel_relaxed(frames, qspi->regs + REG_FRAMESUP);
++	frames = total_bytes & BYTESLOWER_MASK;
++	frames |= cmd_bytes << FRAMES_CMDBYTES_SHIFT;
++	frames |= idle_cycles << FRAMES_IDLE_SHIFT;
++	control = readl_relaxed(qspi->regs + REG_CONTROL);
++	if (control & CONTROL_MODE12_MASK)
++		frames |= (1 << FRAMES_SHIFT);
++
++	frames |= FRAMES_FLAGWORD;
++	writel_relaxed(frames, qspi->regs + REG_FRAMES);
++
++	list_for_each_entry(t, &m->transfers, transfer_list) {
++		if (t->tx_buf) {
++			qspi->txbuf = (u8 *)t->tx_buf;
++			qspi->tx_len = t->len;
++			mchp_coreqspi_write_op(qspi, true);
++		} else {
++			qspi->rxbuf = (u8 *)t->rx_buf;
++			qspi->rx_len = t->len;
++		}
++	}
++
++	mchp_coreqspi_enable_ints(qspi);
++
++	if (!wait_for_completion_timeout(&qspi->data_completion, msecs_to_jiffies(1000)))
++		ret = -ETIMEDOUT;
++
++	m->actual_length = total_bytes;
++
++error:
++	m->status = ret;
++	spi_finalize_current_message(ctlr);
++	mutex_unlock(&qspi->op_lock);
++	mchp_coreqspi_disable_ints(qspi);
++
++	return ret;
++}
++
+ static int mchp_coreqspi_probe(struct platform_device *pdev)
+ {
+ 	struct spi_controller *ctlr;
+@@ -550,6 +646,7 @@ static int mchp_coreqspi_probe(struct platform_device *pdev)
+ 	ctlr->mode_bits = SPI_CPOL | SPI_CPHA | SPI_RX_DUAL | SPI_RX_QUAD |
+ 			  SPI_TX_DUAL | SPI_TX_QUAD;
+ 	ctlr->dev.of_node = np;
++	ctlr->transfer_one_message = mchp_coreqspi_transfer_one_message;
+ 
+ 	ret = devm_spi_register_controller(&pdev->dev, ctlr);
+ 	if (ret) {
+-- 
+2.25.1
+

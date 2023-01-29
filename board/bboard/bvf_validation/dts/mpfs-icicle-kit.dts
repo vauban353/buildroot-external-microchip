@@ -1,0 +1,320 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/* Copyright (c) 2020-2021 Microchip Technology Inc */
+
+/dts-v1/;
+
+#include "mpfs.dtsi"
+#include "mpfs-icicle-kit-fabric.dtsi"
+
+/* Clock frequency (in Hz) of the rtcclk */
+#define MTIMER_FREQ		1000000
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	model = "Microchip PolarFire-SoC Icicle Kit";
+	compatible = "microchip,mpfs-icicle-reference-rtlv2209", "microchip,mpfs-icicle-kit",
+		     "microchip,mpfs";
+
+	aliases {
+		ethernet0 = &mac1;
+//		ethernet0 = &mac0;
+		serial0 = &mmuart0;
+		serial1 = &mmuart1;
+		serial2 = &mmuart2;
+		serial3 = &mmuart3;
+		serial4 = &mmuart4;
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	cpus {
+		timebase-frequency = <MTIMER_FREQ>;
+	};
+
+	ddrc_cache: memory@1000000000 {
+		device_type = "memory";
+		reg = <0x10 0x0 0x0 0x76000000>;
+		status = "okay";
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		fabricbuf0ddrc: buffer@80000000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0x80000000 0x0 0x2000000>;
+		};
+
+		fabricbuf1ddrnc: buffer@c0000000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0xc0000000 0x0 0x8000000>;
+		};
+
+		fabricbuf2ddrncwcb: buffer@d0000000 {
+			compatible = "shared-dma-pool";
+			reg = <0x0 0xd0000000 0x0 0x8000000>;
+		};
+	};
+
+//	udmabuf0 {
+//		compatible = "ikwzm,u-dma-buf";
+//		device-name = "udmabuf-ddr-c0";
+//		minor-number = <0>;
+//		size = <0x0 0x2000000>;
+//		memory-region = <&fabricbuf0ddrc>;
+//		sync-mode = <3>;
+//	};
+//
+//	udmabuf1 {
+//		compatible = "ikwzm,u-dma-buf";
+//		device-name = "udmabuf-ddr-nc0";
+//		minor-number = <1>;
+//		size = <0x0 0x8000000>;
+//		memory-region = <&fabricbuf1ddrnc>;
+//		sync-mode = <3>;
+//	};
+//
+//	udmabuf2 {
+//		compatible = "ikwzm,u-dma-buf";
+//		device-name = "udmabuf-ddr-nc-wcb0";
+//		minor-number = <2>;
+//		size = <0x0 0x8000000>;
+//		memory-region = <&fabricbuf2ddrncwcb>;
+//		sync-mode = <3>;
+//	};
+
+
+	soc {
+	};
+};
+
+//&can0 {
+//	status = "okay";
+//};
+
+//&core_pwm0 {
+//	status = "okay";
+//};
+
+
+//&fpgadma {
+//	status = "okay";
+//};
+
+//&fpgalsram {
+//	status = "okay";
+//};
+
+&gpio2 {
+	interrupts = <53>, <53>, <53>, <53>,
+		     <53>, <53>, <53>, <53>,
+		     <53>, <53>, <53>, <53>,
+		     <53>, <53>, <53>, <53>,
+		     <53>, <53>, <53>, <53>,
+		     <53>, <53>, <53>, <53>,
+		     <53>, <53>, <53>, <53>,
+		     <53>, <53>, <53>, <53>;
+	status = "okay";
+};
+
+&i2c0 {
+	status = "okay";
+};
+
+//&i2c1 {
+//	status = "okay";
+//	pac193x: adc@10 {
+//		compatible = "microchip,pac1934";
+//		reg = <0x10>;
+//		microchip,samp-rate = <64>;
+//		status = "okay";
+//		ch0: channel0 {
+//			microchip,uohms-shunt-res = <10000>;
+//			rail-name = "VDDREG";
+//			microchip,channel-enabled;
+//		};
+//		ch1: channel1 {
+//			microchip,uohms-shunt-res = <10000>;
+//			rail-name = "VDDA25";
+//			microchip,channel-enabled;
+//		};
+//		ch2: channel2 {
+//			microchip,uohms-shunt-res = <10000>;
+//			rail-name = "VDD25";
+//			microchip,channel-enabled;
+//		};
+//		ch3: channel3 {
+//			microchip,uohms-shunt-res = <10000>;
+//			rail-name = "VDDA_REG";
+//			microchip,channel-enabled;
+//		};
+//	};
+//};
+
+//&i2c2 {
+//	status = "okay";
+//};
+
+&mac0 {
+	status = "okay";
+	phy-mode = "sgmii";
+	phy-handle = <&phy0>;
+	phy0: ethernet-phy@0 {
+		reg = <0>;
+	};
+};
+
+&mac1 {
+	status = "okay";
+	phy-mode = "sgmii";
+	phy-handle = <&phy1>;
+	phy1: ethernet-phy@0 {
+		reg = <0>;
+	};
+};
+
+//&mac0 {
+//	status = "okay";
+//	phy-mode = "sgmii";
+//	phy-handle = <&phy0>;
+//};
+
+//&mac1 {
+//	status = "okay";
+//	phy-mode = "sgmii";
+//	phy-handle = <&phy1>;
+//	phy1: ethernet-phy@9 {
+//		reg = <9>;
+//	};
+//	phy0: ethernet-phy@8 {
+//		reg = <8>;
+//	};
+//};
+
+&mbox {
+	status = "okay";
+};
+
+&mmc {
+	status = "okay";
+	bus-width = <8>;
+	disable-wp;
+	cap-mmc-highspeed;
+	mmc-ddr-1_8v;
+	mmc-hs200-1_8v;
+};
+
+&mmuart0 {
+	status = "okay";
+};
+
+&mmuart1 {
+	status = "okay";
+};
+
+&mmuart2 {
+	status = "okay";
+};
+
+&mmuart3 {
+	status = "okay";
+};
+
+&mmuart4 {
+	status = "okay";
+};
+
+//&pcie {
+//	status = "okay";
+//};
+
+
+//&{/soc} {
+//	adc_external_vref: adc_external_vref {
+//		compatible = "regulator-fixed";
+//		regulator-name = "adc_vref";
+//	    regulator-min-microvolt = <2048000>;
+//	    regulator-max-microvolt = <2048000>;
+//	    regulator-always-on;
+//	    regulator-boot-on;
+//		status = "okay";
+//	};
+//};
+
+
+
+
+&qspi {
+	status = "okay";
+
+	mcp3564: mcp3564@0 {
+			compatible = "microchip,mcp3564r";
+			reg = <0>; /* CE0 */
+			spi-cpol;
+			spi-cpha;
+			spi-max-frequency = <15000000>;
+			status = "okay";
+//			vref-supply = <&adc_external_vref>;
+			microchip,device-addr = <1>;
+	};
+};
+
+
+//&{/} {
+//    adc_external_vref: adc_external_vref@0 {
+//        compatible = "regulator-fixed";
+//        regulator-name = "adc_vref";
+//        regulator-min-microvolt = <2048000>;
+//        regulator-max-microvolt = <2048000>;
+//        regulator-always-on;
+//        regulator-boot-on;
+//        status = "okay";
+//    };
+//};
+//
+//&qspi {
+//    status = "okay";
+//
+//    mcp3564: mcp3564@0 {
+//            compatible = "microchip,mcp3564";
+//            reg = <0>; /* to use mikroBUS2_CS - PC4. */
+//
+//            spi-cpol;
+//            spi-cpha;
+//            spi-max-frequency = <15000000>;
+//
+////            vref-supply = <&adc_external_vref>;
+//            microchip,device-addr = <1>;
+//
+//    };
+//};
+
+&refclk {
+	clock-frequency = <125000000>;
+};
+
+&rtc {
+	status = "okay";
+};
+
+&spi0 {
+	status = "okay";
+};
+
+&spi1 {
+	status = "okay";
+};
+
+&syscontroller {
+	status = "okay";
+};
+
+&usb {
+	status = "okay";
+	dr_mode = "host";
+};

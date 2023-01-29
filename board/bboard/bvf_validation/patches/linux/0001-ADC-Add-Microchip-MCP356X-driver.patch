@@ -1,0 +1,1383 @@
+From 980e8c70a74a81459f372e9c6a7dfa835a2e564b Mon Sep 17 00:00:00 2001
+From: vauban353 <vauban353@gmail.com>
+Date: Wed, 7 Dec 2022 16:51:29 +0000
+Subject: [PATCH] ADC: Add Microchip MCP356X driver.
+
+---
+ drivers/iio/adc/Kconfig   |   10 +
+ drivers/iio/adc/Makefile  |    1 +
+ drivers/iio/adc/mcp356x.c | 1329 +++++++++++++++++++++++++++++++++++++
+ 3 files changed, 1340 insertions(+)
+ create mode 100644 drivers/iio/adc/mcp356x.c
+
+diff --git a/drivers/iio/adc/Kconfig b/drivers/iio/adc/Kconfig
+index af168e1c9fdb..b81bf2a6dd69 100644
+--- a/drivers/iio/adc/Kconfig
++++ b/drivers/iio/adc/Kconfig
+@@ -705,6 +705,16 @@ config MCP3911
+ 	  This driver can also be built as a module. If so, the module will be
+ 	  called mcp3911.
+ 
++config MCP356X
++	tristate "Microchip Technology MCP356X driver"
++	depends on SPI
++	help
++	  Say yes here to build support for Microchip Technology's MCP356X
++	  analog to digital converter.
++
++	  This driver can also be built as a module. If so, the module will be
++	  called mcp356x.
++
+ config MEDIATEK_MT6360_ADC
+ 	tristate "Mediatek MT6360 ADC driver"
+ 	depends on MFD_MT6360
+diff --git a/drivers/iio/adc/Makefile b/drivers/iio/adc/Makefile
+index d68550f493e3..cd9d2c053d0a 100644
+--- a/drivers/iio/adc/Makefile
++++ b/drivers/iio/adc/Makefile
+@@ -65,6 +65,7 @@ obj-$(CONFIG_MAX9611) += max9611.o
+ obj-$(CONFIG_MCP320X) += mcp320x.o
+ obj-$(CONFIG_MCP3422) += mcp3422.o
+ obj-$(CONFIG_MCP3911) += mcp3911.o
++obj-$(CONFIG_MCP356X) += mcp356x.o
+ obj-$(CONFIG_MEDIATEK_MT6360_ADC) += mt6360-adc.o
+ obj-$(CONFIG_MEDIATEK_MT6577_AUXADC) += mt6577_auxadc.o
+ obj-$(CONFIG_MEN_Z188_ADC) += men_z188_adc.o
+diff --git a/drivers/iio/adc/mcp356x.c b/drivers/iio/adc/mcp356x.c
+new file mode 100644
+index 000000000000..681f012223af
+--- /dev/null
++++ b/drivers/iio/adc/mcp356x.c
+@@ -0,0 +1,1329 @@
++// SPDX-License-Identifier: GPL-2.0+
++/*
++ * IIO driver for MCP356X/MCP356XR and MCP346X/MCP346XRseries chip family
++ *
++ * Copyright (C) 2022 Microchip Technology Inc. and its subsidiaries
++ *
++ * Author: Marius Cristea <marius.cristea@microchip.com>
++ *
++ * Datasheet for MCP3561, MCP3562, MCP3564 can be found here:
++ * https://ww1.microchip.com/downloads/aemDocuments/documents/MSLD/ProductDocuments/DataSheets/MCP3561-2-4-Family-Data-Sheet-DS20006181C.pdf
++ * Datasheet for MCP3561R, MCP3562R, MCP3564R can be found here:
++ * https://ww1.microchip.com/downloads/aemDocuments/documents/APID/ProductDocuments/DataSheets/MCP3561_2_4R-Data-Sheet-DS200006391C.pdf
++ * Datasheet for MCP3461, MCP3462, MCP3464 can be found here:
++ * https://ww1.microchip.com/downloads/aemDocuments/documents/APID/ProductDocuments/DataSheets/MCP3461-2-4-Two-Four-Eight-Channel-153.6-ksps-Low-Noise-16-Bit-Delta-Sigma-ADC-Data-Sheet-20006180D.pdf
++ * Datasheet for MCP3461R, MCP3462R, MCP3464R can be found here:
++ * https://ww1.microchip.com/downloads/aemDocuments/documents/APID/ProductDocuments/DataSheets/MCP3461-2-4R-Family-Data-Sheet-DS20006404C.pdf
++ *
++ */
++
++#include <linux/acpi.h>
++#include <linux/delay.h>
++#include <linux/err.h>
++#include <linux/regulator/consumer.h>
++#include <linux/spi/spi.h>
++#include <linux/util_macros.h>
++
++#include <linux/iio/iio.h>
++#include <linux/iio/sysfs.h>
++
++#define MCP356X_ADCDATA         0x00
++#define MCP356X_CONFIG0         0x01
++#define MCP356X_CONFIG1         0x02
++#define MCP356X_CONFIG2         0x03
++#define MCP356X_CONFIG3         0x04
++#define MCP356X_IRQ             0x05
++#define MCP356X_MUX             0x06
++#define MCP356X_SCAN            0x07
++#define MCP356X_TIMER           0x08
++#define MCP356X_OFFSETCAL       0x09
++#define MCP356X_GAINCAL         0x0A
++#define MCP356X_RESERVED_B      0x0B
++#define MCP356X_RESERVED_C      0x0C
++#define MCP356X_LOCK            0x0D
++#define MCP356X_RESERVED_E      0x0E
++#define MCP356X_CRCCFG          0x0F
++
++#define MCP356X_FAST_CMD_CTRL   0x00
++#define MCP356X_RD_CTRL         0x01
++#define MCP356X_WRT_CTRL        0x02
++
++#define MCP356X_FULL_RESET_CMD  0x0E
++
++#define MCP3461_HW_ID           0x0008
++#define MCP3462_HW_ID           0x0009
++#define MCP3464_HW_ID           0x000B
++
++#define MCP3561_HW_ID           0x000C
++#define MCP3562_HW_ID           0x000D
++#define MCP3564_HW_ID           0x000F
++#define MCP356X_HW_ID_MASK      0x000F
++
++#define MCP356XR_INT_VREF_MV    2400
++
++#define MCP356X_REG_WRITE(chip_addr, reg)   (((chip_addr) << 6) | ((reg) << 2) | MCP356X_WRT_CTRL)
++#define MCP356X_REG_READ(chip_addr, reg)    (((chip_addr) << 6) | ((reg) << 2) | MCP356X_RD_CTRL)
++#define MCP356X_FAST_CMD(chip_addr, cmd)    (((chip_addr) << 6) | ((cmd) << 2))
++
++/* MUX_VIN Input Selection
++ */
++#define MCP356X_INTERNAL_VCM    0b1111
++#define MCP356X_TEMP_DIODE_M    0b1110
++#define MCP356X_TEMP_DIODE_P    0b1101
++#define MCP356X_REFIN_NEG       0b1100
++#define MCP356X_REFIN_POZ       0b1011
++#define MCP356X_RESERVED        0b1010 /* do not use */
++#define MCP356X_AVDD            0b1001
++#define MCP356X_AGND            0b1000
++#define MCP356X_CH7             0b0111
++#define MCP356X_CH6             0b0110
++#define MCP356X_CH5             0b0101
++#define MCP356X_CH4             0b0100
++#define MCP356X_CH3             0b0011
++#define MCP356X_CH2             0b0010
++#define MCP356X_CH1             0b0001
++#define MCP356X_CH0             0b0000
++
++#define MCP356X_ADC_MODE_MASK        0x03
++
++#define MCP356X_ADC_DEFAULT_MODE     0b00
++#define MCP356X_ADC_SHUTDOWN_MODE    0b01
++#define MCP356X_ADC_STANDBY          0b10
++#define MCP356X_ADC_CONVERSION_MODE  0b11
++
++#define MCP356X_DATA_READY_MASK      0x40
++
++#define MCP356X_OVERSAMPLING_RATIO_32       0x00
++#define MCP356X_OVERSAMPLING_RATIO_64       0x01
++#define MCP356X_OVERSAMPLING_RATIO_128      0x02
++#define MCP356X_OVERSAMPLING_RATIO_256      0x03
++#define MCP356X_OVERSAMPLING_RATIO_512      0x04
++#define MCP356X_OVERSAMPLING_RATIO_1024     0x05
++#define MCP356X_OVERSAMPLING_RATIO_2048     0x06
++#define MCP356X_OVERSAMPLING_RATIO_4096     0x07
++#define MCP356X_OVERSAMPLING_RATIO_8192     0x08
++#define MCP356X_OVERSAMPLING_RATIO_16384    0x09
++#define MCP356X_OVERSAMPLING_RATIO_20480    0x0A
++#define MCP356X_OVERSAMPLING_RATIO_24576    0x0B
++#define MCP356X_OVERSAMPLING_RATIO_40960    0x0C
++#define MCP356X_OVERSAMPLING_RATIO_49152    0x0D
++#define MCP356X_OVERSAMPLING_RATIO_81920    0x0E
++#define MCP356X_OVERSAMPLING_RATIO_98304    0x0F
++
++#define MCP356X_OVERSAMPLING_RATIO_MASK     0x3C
++#define MCP356X_OVERSAMPLING_RATIO_SHIFT    0x02
++
++#define MCP356X_HARDWARE_GAIN_MASK          0x38
++#define MCP356X_HARDWARE_GAIN_SHIFT         0x03
++#define MCP356X_DEFAULT_HARDWARE_GAIN       0x01
++
++#define MCP356X_CS_SEL_0_0_uA               0x00
++#define MCP356X_CS_SEL_0_9_uA               0x01
++#define MCP356X_CS_SEL_3_7_uA               0x02
++#define MCP356X_CS_SEL_15__uA               0x03
++
++#define MCP356X_CS_SEL_MASK                 0x0C
++
++#define MCP356X_BOOST_CURRENT_x0_50         0x00
++#define MCP356X_BOOST_CURRENT_x0_66         0x01
++#define MCP356X_BOOST_CURRENT_x1_00         0x02
++#define MCP356X_BOOST_CURRENT_x2_00         0x03
++
++#define MCP356X_BOOST_CURRENT_MASK          0xC0
++
++#define MCP356X_AZ_MUX_MASK                 0x04 /* Auto-Zeroing MUX Setting */
++#define MCP356X_AZ_REF_MASK                 0x02 /* Auto-Zeroing REF Setting */
++
++#define MCP356X_SHARED_DEVATTRS_COUNT       1
++#define MCP356X_PARTICULAR_DEVATTRS_COUNT   1
++
++#define MAX_HWGAIN_x1000                    64000
++
++#define MCP356X_DATA_READY_TIMEOUT          2000
++
++enum mcp356x_ids {
++	mcp3461,
++	mcp3462,
++	mcp3464,
++	mcp3461r,
++	mcp3462r,
++	mcp3464r,
++	mcp3561,
++	mcp3562,
++	mcp3564,
++	mcp3561r,
++	mcp3562r,
++	mcp3564r,
++};
++
++static const struct of_device_id mcp356x_dt_ids[] = {
++	{ .compatible = "microchip,mcp3461" },
++	{ .compatible = "microchip,mcp3462" },
++	{ .compatible = "microchip,mcp3464" },
++	{ .compatible = "microchip,mcp3461r" },
++	{ .compatible = "microchip,mcp3462r" },
++	{ .compatible = "microchip,mcp3464r" },
++	{ .compatible = "microchip,mcp3561" },
++	{ .compatible = "microchip,mcp3562" },
++	{ .compatible = "microchip,mcp3564" },
++	{ .compatible = "microchip,mcp3561r" },
++	{ .compatible = "microchip,mcp3562r" },
++	{ .compatible = "microchip,mcp3564r" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, mcp356x_dt_ids);
++
++static const struct spi_device_id mcp356x_id[] = {
++	{ "mcp3461",  mcp3461 },
++	{ "mcp3462",  mcp3462 },
++	{ "mcp3464",  mcp3464 },
++	{ "mcp3461r", mcp3461r },
++	{ "mcp3462r", mcp3462r },
++	{ "mcp3464r", mcp3464r },
++	{ "mcp3561",  mcp3561 },
++	{ "mcp3562",  mcp3562 },
++	{ "mcp3564",  mcp3564 },
++	{ "mcp3561r", mcp3561r },
++	{ "mcp3562r", mcp3562r },
++	{ "mcp3564r", mcp3564r },
++	{ }
++};
++MODULE_DEVICE_TABLE(spi, mcp356x_id);
++
++static const unsigned int mcp356x_oversampling_avail[16] = {
++	[MCP356X_OVERSAMPLING_RATIO_32]    =    32,
++	[MCP356X_OVERSAMPLING_RATIO_64]    =    64,
++	[MCP356X_OVERSAMPLING_RATIO_128]   =   128,
++	[MCP356X_OVERSAMPLING_RATIO_256]   =   256,
++	[MCP356X_OVERSAMPLING_RATIO_512]   =   512,
++	[MCP356X_OVERSAMPLING_RATIO_1024]  =  1024,
++	[MCP356X_OVERSAMPLING_RATIO_2048]  =  2048,
++	[MCP356X_OVERSAMPLING_RATIO_4096]  =  4096,
++	[MCP356X_OVERSAMPLING_RATIO_8192]  =  8192,
++	[MCP356X_OVERSAMPLING_RATIO_16384] = 16384,
++	[MCP356X_OVERSAMPLING_RATIO_20480] = 20480,
++	[MCP356X_OVERSAMPLING_RATIO_24576] = 24576,
++	[MCP356X_OVERSAMPLING_RATIO_40960] = 40960,
++	[MCP356X_OVERSAMPLING_RATIO_49152] = 49152,
++	[MCP356X_OVERSAMPLING_RATIO_81920] = 81920,
++	[MCP356X_OVERSAMPLING_RATIO_98304] = 98304
++};
++
++/*
++ * Current Source/Sink Selection Bits for Sensor Bias (source on VIN+/sink on VIN-)
++ */
++static const char * const mcp356x_current_bias_avail[] = {
++	[MCP356X_CS_SEL_0_0_uA] = "No_current_source_is_applied_to_the_ADC_inputs_(default)",
++	[MCP356X_CS_SEL_0_9_uA] = "0.9_uA_is_applied_to_the_ADC_inputs",
++	[MCP356X_CS_SEL_3_7_uA] = "3.7_uA_is_applied_to_the_ADC_inputs",
++	[MCP356X_CS_SEL_15__uA] = "15_uA_is_applied_to_the_ADC_inputs",
++};
++
++/*
++ * BOOST[1:0]: ADC Bias Current Selection
++ */
++static const char * const mcp356x_boost_current_avail[] = {
++	[MCP356X_BOOST_CURRENT_x0_50] = "ADC_channel_has_current_x_0.5",
++	[MCP356X_BOOST_CURRENT_x0_66] = "ADC_channel_has_current_x_0.66",
++	[MCP356X_BOOST_CURRENT_x1_00] = "ADC_channel_has_current_x_1_(default)",
++	[MCP356X_BOOST_CURRENT_x2_00] = "ADC_channel_has_current_x_2",
++};
++
++/*
++ * Calibration bias, IIO range format int
++ */
++static const int mcp356x_calibbias[] = {
++	-8388608,      /* min: -2^23     */
++	 1,            /* step:    1     */
++	 8388607       /* max:  2^23 - 1 */
++};
++
++/*
++ * Calibration scale values, IIO range format int
++ * GAINCAL CALIBRATION VALUE (MULTIPLIER VALUE)
++ * GAINCAL (V/V) = (GAINCAL[23:0] unsigned decimal code)/8388608
++ */
++static const unsigned int mcp356x_calibscale[] = {
++		0,       /* min:     0          */
++		1,       /* step:    1/8388608  */
++	 16777215        /* max: 2 - 2^(-23)    */
++};
++
++static const int mcp356x_hwgain_frac[] = {
++	3, 10, 1, 1, 2, 1, 4, 1, 8, 1, 16, 1, 32, 1, 64, 1};
++
++static const int mcp356x_hwgain[] = {
++	300, 1000, 2000, 4000, 8000, 16000, 32000, 64000};
++
++struct mcp356x_chip_info {
++	const struct    iio_chan_spec *channels;
++	unsigned int    num_channels;
++	unsigned int    int_vref_uv;
++	bool            has_vref;
++};
++
++struct mcp356x_state {
++	const struct mcp356x_chip_info  *chip_info;
++	struct iio_info         mcp356x_info;
++	struct spi_device       *spi;
++	struct regulator        *vref;
++	unsigned short          vref_mv;
++	struct mutex            lock; /*lock to prevent concurent reads/writes */
++	unsigned int            dev_addr;
++	unsigned int            oversampling;
++	unsigned int            hwgain;
++	int                     calibbias;
++	int                     calibscale;
++	int                     currentboost_mode;
++	int                     currentbias_mode;
++	bool                    auto_zeroing_mux;
++	bool                    auto_zeroing_ref;
++};
++
++static int mcp356x_read(struct mcp356x_state *adc, u8 reg, u32 *val, u8 len)
++{
++	int ret;
++	u8 tmp_reg;
++
++	tmp_reg = MCP356X_REG_READ(adc->dev_addr, reg);
++
++	ret = spi_write_then_read(adc->spi, &tmp_reg, 1, val, len);
++
++	if (ret < 0)
++		return ret;
++
++	be32_to_cpus(val);
++	*val >>= ((4 - len) * 8);
++
++	return ret;
++}
++
++static int mcp356x_write(struct mcp356x_state *adc, u8 reg, u32 val, u8 len)
++{
++	val |= (MCP356X_REG_WRITE(adc->dev_addr, reg) << (len * 8));
++	val <<= (3 - len) * 8;
++	cpu_to_be32s(&val);
++
++	return spi_write(adc->spi, &val, len + 1);
++}
++
++static int mcp356x_fast_cmd(struct mcp356x_state *adc, u8 fast_cmd)
++{
++	u8 val;
++
++	val = MCP356X_FAST_CMD(adc->dev_addr, fast_cmd);
++
++	return spi_write(adc->spi, &val, 1);
++}
++
++static int mcp356x_update(struct mcp356x_state *adc, u8 reg, u32 mask, u32 val,
++			  u8 len)
++{
++	u32 tmp;
++	int ret;
++
++	ret = mcp356x_read(adc, reg, &tmp, len);
++	if (ret < 0)
++		return ret;
++
++	val &= mask;
++	val |= tmp & ~mask;
++	return mcp356x_write(adc, reg, val, len);
++}
++
++static int mcp356x_set_currentboost_mode(struct iio_dev *indio_dev,
++					 const struct iio_chan_spec *chan,
++					 unsigned int mode)
++{
++	struct mcp356x_state *adc = iio_priv(indio_dev);
++	int ret;
++
++	dev_info(&indio_dev->dev, "%s: %d\n", __func__, mode);
++
++	mutex_lock(&adc->lock);
++	ret = mcp356x_update(adc, MCP356X_CONFIG2, MCP356X_BOOST_CURRENT_MASK,
++			     mode, 1);
++
++	if (ret < 0)
++		dev_err(&indio_dev->dev, "Failed to configure CONFIG2 register\n");
++	else
++		adc->currentboost_mode = mode;
++
++	mutex_unlock(&adc->lock);
++	return ret;
++}
++
++static int mcp356x_get_currentboost_mode(struct iio_dev *indio_dev,
++					 const struct iio_chan_spec *chan)
++{
++	struct mcp356x_state *adc = iio_priv(indio_dev);
++
++	return adc->currentboost_mode;
++}
++
++static int mcp356x_set_currentbias_mode(struct iio_dev *indio_dev,
++					const struct iio_chan_spec *chan,
++					unsigned int mode)
++{
++	struct mcp356x_state *adc = iio_priv(indio_dev);
++	int ret;
++
++	dev_info(&indio_dev->dev, "%s: %d\n", __func__, mode);
++
++	mutex_lock(&adc->lock);
++	ret = mcp356x_update(adc, MCP356X_CONFIG0, MCP356X_CS_SEL_MASK, mode, 1);
++
++	if (ret < 0)
++		dev_err(&indio_dev->dev, "Failed to configure CONFIG0 register\n");
++	else
++		adc->currentbias_mode = mode;
++
++	mutex_unlock(&adc->lock);
++	return ret;
++}
++
++static int mcp356x_get_currentbias_mode(struct iio_dev *indio_dev,
++					const struct iio_chan_spec *chan)
++{
++	struct mcp356x_state *adc = iio_priv(indio_dev);
++
++	return adc->currentbias_mode;
++}
++
++static const struct iio_enum mcp356x_currentboost_mode_enum = {
++	.items = mcp356x_boost_current_avail,
++	.num_items = ARRAY_SIZE(mcp356x_boost_current_avail),
++	.set = mcp356x_set_currentboost_mode,
++	.get = mcp356x_get_currentboost_mode,
++};
++
++static const struct iio_enum mcp356x_currentbias_mode_enum = {
++	.items = mcp356x_current_bias_avail,
++	.num_items = ARRAY_SIZE(mcp356x_current_bias_avail),
++	.set = mcp356x_set_currentbias_mode,
++	.get = mcp356x_get_currentbias_mode,
++};
++
++static const struct iio_chan_spec_ext_info mcp356x_ext_info[] = {
++	IIO_ENUM("boost_current", IIO_SHARED_BY_ALL, &mcp356x_currentboost_mode_enum),
++	{
++		.name = "boost_current_available",
++		.shared = IIO_SHARED_BY_ALL,
++		.read = iio_enum_available_read,
++		.private = (uintptr_t)&mcp356x_currentboost_mode_enum,
++	},
++	IIO_ENUM("current_bias", IIO_SHARED_BY_ALL, &mcp356x_currentbias_mode_enum),
++	{
++		.name = "current_bias_available",
++		.shared = IIO_SHARED_BY_ALL,
++		.read = iio_enum_available_read,
++		.private = (uintptr_t)&mcp356x_currentbias_mode_enum,
++	},
++	{}
++};
++
++/* Custom IIO Device Attributes */
++static ssize_t mcp356x_auto_zeroing_mux_show(struct device *dev,
++					     struct device_attribute *attr,
++					     char *buf)
++{
++	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
++	struct mcp356x_state *adc = iio_priv(indio_dev);
++
++	return sysfs_emit(buf, "%d\n", (bool)(adc->auto_zeroing_mux));
++}
++
++static ssize_t mcp356x_auto_zeroing_mux_store(struct device *dev,
++					      struct device_attribute *attr,
++					      const char *buf, size_t len)
++{
++	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
++	struct mcp356x_state *adc = iio_priv(indio_dev);
++	bool auto_zero;
++	int ret;
++
++	ret = strtobool(buf, &auto_zero);
++	if (ret)
++		return ret;
++
++	mutex_lock(&adc->lock);
++	ret = mcp356x_update(adc, MCP356X_CONFIG2, MCP356X_AZ_MUX_MASK,
++			     (u32)auto_zero, 1);
++
++	if (ret < 0)
++		dev_err(&indio_dev->dev, "Failed to config CONFIG2 register\n");
++	else
++		adc->auto_zeroing_mux = auto_zero;
++
++	mutex_unlock(&adc->lock);
++	return ret ? ret : len;
++}
++
++static ssize_t mcp356x_auto_zeroing_ref_show(struct device *dev,
++					     struct device_attribute *attr,
++					     char *buf)
++{
++	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
++	struct mcp356x_state *adc = iio_priv(indio_dev);
++
++	return sysfs_emit(buf, "%d\n", (bool)(adc->auto_zeroing_ref));
++}
++
++static ssize_t mcp356x_auto_zeroing_ref_store(struct device *dev,
++					      struct device_attribute *attr,
++					      const char *buf, size_t len)
++{
++	struct iio_dev *indio_dev = dev_to_iio_dev(dev);
++	struct mcp356x_state *adc = iio_priv(indio_dev);
++	bool auto_zero;
++	int ret;
++
++	ret = strtobool(buf, &auto_zero);
++	if (ret)
++		return ret;
++
++	mutex_lock(&adc->lock);
++	ret = mcp356x_update(adc, MCP356X_CONFIG2, MCP356X_AZ_REF_MASK,
++			     (u32)auto_zero, 1);
++
++	if (ret < 0)
++		dev_err(&indio_dev->dev, "Failed to config CONFIG2 register\n");
++	else
++		adc->auto_zeroing_ref = auto_zero;
++
++	mutex_unlock(&adc->lock);
++	return ret ? ret : len;
++}
++
++#define MCP356X_DEV_ATTR(name) (&iio_dev_attr_##name.dev_attr.attr)
++
++static IIO_DEVICE_ATTR(enable_auto_zeroing_ref, 0644,
++		       mcp356x_auto_zeroing_ref_show,
++		       mcp356x_auto_zeroing_ref_store, 0);
++
++static struct attribute *mcp356x_particular_attributes[] = {
++	MCP356X_DEV_ATTR(enable_auto_zeroing_ref),
++	NULL
++};
++
++static IIO_DEVICE_ATTR(enable_auto_zeroing_mux, 0644,
++		       mcp356x_auto_zeroing_mux_show,
++		       mcp356x_auto_zeroing_mux_store, 0);
++
++static struct attribute *mcp356x_shared_attributes[] = {
++	MCP356X_DEV_ATTR(enable_auto_zeroing_mux),
++	NULL,
++};
++
++static const struct attribute_group mcp356x_attribute_group = {
++	.attrs = mcp356x_shared_attributes,
++	NULL,
++};
++
++static int mcp356x_prep_custom_attributes(struct mcp356x_state *adc,
++					  struct iio_dev *indio_dev)
++{
++	int i, ret = 0;
++	struct attribute **mcp356x_custom_attributes;
++	struct attribute_group *mcp356x_group;
++
++	mcp356x_group = kzalloc(sizeof(*mcp356x_group), GFP_KERNEL);
++
++	if (!mcp356x_group) {
++		ret = -ENOMEM;
++		goto end;
++	}
++
++	mcp356x_custom_attributes = kzalloc((MCP356X_SHARED_DEVATTRS_COUNT +
++		MCP356X_PARTICULAR_DEVATTRS_COUNT) * sizeof(struct attribute *) + 1,
++		GFP_KERNEL);
++
++	if (!mcp356x_custom_attributes) {
++		ret = -ENOMEM;
++		goto end;
++	}
++
++	for (i = 0; i < MCP356X_SHARED_DEVATTRS_COUNT; i++)
++		mcp356x_custom_attributes[i] = mcp356x_shared_attributes[i];
++
++	if (adc->chip_info->has_vref) {
++		dev_info(&indio_dev->dev, "Setup custom attr for R variant\n");
++		for (i = 0; i < MCP356X_PARTICULAR_DEVATTRS_COUNT; i++)
++			mcp356x_custom_attributes[MCP356X_SHARED_DEVATTRS_COUNT + i] =
++				mcp356x_particular_attributes[i];
++	}
++
++	mcp356x_group->attrs = mcp356x_custom_attributes;
++	adc->mcp356x_info.attrs = mcp356x_group;
++
++end:
++	return ret;
++}
++
++#define MCP356X_V_CHANNEL(index, addr, depth) {                               \
++	.type = IIO_VOLTAGE,                                                  \
++	.indexed = 1,                                                         \
++	.channel = (index),                                                   \
++	.address = (((addr) << 4) | MCP356X_AGND),                            \
++	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),                         \
++	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),                 \
++	.info_mask_shared_by_all  = BIT(IIO_CHAN_INFO_HARDWAREGAIN)        |  \
++				BIT(IIO_CHAN_INFO_CALIBBIAS)               |  \
++				BIT(IIO_CHAN_INFO_CALIBSCALE)              |  \
++				BIT(IIO_CHAN_INFO_OVERSAMPLING_RATIO),        \
++	.info_mask_shared_by_all_available = BIT(IIO_CHAN_INFO_CALIBSCALE) |  \
++				BIT(IIO_CHAN_INFO_HARDWAREGAIN)            |  \
++				BIT(IIO_CHAN_INFO_CALIBBIAS)               |  \
++				BIT(IIO_CHAN_INFO_OVERSAMPLING_RATIO),        \
++	.ext_info = mcp356x_ext_info,                                         \
++	.scan_index = 0,                                                      \
++	.scan_type = {                                                        \
++		.sign = 's',                                                  \
++		.realbits = depth,                                            \
++		.storagebits = 32,                                            \
++		.shift = 0,                                                   \
++		.endianness = IIO_BE,                                         \
++	},                                                                    \
++}
++
++#define MCP356X_T_CHAN(depth) {                                               \
++	.type = IIO_TEMP,                                                     \
++	.channel = 0,                                                         \
++	.address = ((MCP356X_TEMP_DIODE_P << 4) | MCP356X_TEMP_DIODE_M),      \
++	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),                         \
++	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),                 \
++	.info_mask_shared_by_all  = BIT(IIO_CHAN_INFO_HARDWAREGAIN)        |  \
++			BIT(IIO_CHAN_INFO_CALIBBIAS)                       |  \
++			BIT(IIO_CHAN_INFO_CALIBSCALE)                      |  \
++			BIT(IIO_CHAN_INFO_OVERSAMPLING_RATIO),                \
++	.info_mask_shared_by_all_available = BIT(IIO_CHAN_INFO_CALIBSCALE) |  \
++			BIT(IIO_CHAN_INFO_CALIBBIAS)                       |  \
++			BIT(IIO_CHAN_INFO_OVERSAMPLING_RATIO),                \
++	.ext_info = mcp356x_ext_info,                                         \
++	.scan_index = 0,                                                      \
++	.scan_type = {                                                        \
++		.sign = 'u',                                                  \
++		.realbits = depth,                                            \
++		.storagebits = 32,                                            \
++		.endianness = IIO_BE,                                         \
++	},                                                                    \
++}
++
++#define MCP356X_V_CHANNEL_DIFF(chan1, chan2, addr, depth) {                   \
++	.type = IIO_VOLTAGE,                                                  \
++	.indexed = 1,                                                         \
++	.channel = (chan1),                                                   \
++	.channel2 = (chan2),                                                  \
++	.address = (addr),                                                    \
++	.differential = 1,                                                    \
++	.info_mask_separate = BIT(IIO_CHAN_INFO_RAW),                         \
++	.info_mask_shared_by_type = BIT(IIO_CHAN_INFO_SCALE),                 \
++	.info_mask_shared_by_all  = BIT(IIO_CHAN_INFO_HARDWAREGAIN)        |  \
++			BIT(IIO_CHAN_INFO_CALIBBIAS)                       |  \
++			BIT(IIO_CHAN_INFO_CALIBSCALE)                      |  \
++			BIT(IIO_CHAN_INFO_OVERSAMPLING_RATIO),                \
++	.info_mask_shared_by_all_available = BIT(IIO_CHAN_INFO_CALIBSCALE) |  \
++			BIT(IIO_CHAN_INFO_CALIBBIAS)                       |  \
++			BIT(IIO_CHAN_INFO_OVERSAMPLING_RATIO),                \
++	.ext_info = mcp356x_ext_info,                                         \
++	.scan_index = 0,                                                      \
++	.scan_type = {                                                        \
++		.sign = 's',                                                  \
++		.realbits = depth,                                            \
++		.storagebits = 32,                                            \
++		.endianness = IIO_BE,                                         \
++	},                                                                    \
++}
++
++#define MCP3561_CHANNELS(depth) {                       \
++	MCP356X_V_CHANNEL(0, 0, depth),                 \
++	MCP356X_V_CHANNEL(1, 1, depth),                 \
++	MCP356X_V_CHANNEL_DIFF(0, 1, 0x01, depth),      \
++	MCP356X_V_CHANNEL_DIFF(1, 0, 0x10, depth),      \
++	MCP356X_T_CHAN(depth)                           \
++}
++
++#define MCP3562_CHANNELS(depth) {                       \
++	MCP356X_V_CHANNEL(0, 0, depth),                 \
++	MCP356X_V_CHANNEL(1, 1, depth),                 \
++	MCP356X_V_CHANNEL(2, 2, depth),                 \
++	MCP356X_V_CHANNEL(3, 3, depth),                 \
++	MCP356X_T_CHAN(depth),                          \
++	MCP356X_V_CHANNEL_DIFF(0, 1, 0x01, depth),      \
++	MCP356X_V_CHANNEL_DIFF(1, 0, 0x10, depth),      \
++	MCP356X_V_CHANNEL_DIFF(0, 2, 0x02, depth),      \
++	MCP356X_V_CHANNEL_DIFF(0, 3, 0x03, depth),      \
++	MCP356X_V_CHANNEL_DIFF(1, 2, 0x12, depth),      \
++	MCP356X_V_CHANNEL_DIFF(1, 3, 0x13, depth),      \
++	MCP356X_V_CHANNEL_DIFF(2, 3, 0x23, depth),      \
++	MCP356X_V_CHANNEL_DIFF(2, 0, 0x20, depth),      \
++	MCP356X_V_CHANNEL_DIFF(3, 0, 0x30, depth),      \
++	MCP356X_V_CHANNEL_DIFF(2, 1, 0x21, depth),      \
++	MCP356X_V_CHANNEL_DIFF(3, 1, 0x31, depth),      \
++	MCP356X_V_CHANNEL_DIFF(3, 2, 0x32, depth),      \
++}
++
++#define MCP3564_CHANNELS(depth) {                       \
++	MCP356X_V_CHANNEL(0, 0, depth),                 \
++	MCP356X_V_CHANNEL(1, 1, depth),                 \
++	MCP356X_V_CHANNEL(2, 2, depth),                 \
++	MCP356X_V_CHANNEL(3, 3, depth),                 \
++	MCP356X_V_CHANNEL(4, 4, depth),                 \
++	MCP356X_V_CHANNEL(5, 5, depth),                 \
++	MCP356X_V_CHANNEL(6, 6, depth),                 \
++	MCP356X_V_CHANNEL(7, 7, depth),                 \
++	MCP356X_T_CHAN(depth),                          \
++	MCP356X_V_CHANNEL_DIFF(0, 1, 0x01, depth),      \
++	MCP356X_V_CHANNEL_DIFF(1, 0, 0x10, depth),      \
++	MCP356X_V_CHANNEL_DIFF(0, 2, 0x02, depth),      \
++	MCP356X_V_CHANNEL_DIFF(0, 3, 0x03, depth),      \
++	MCP356X_V_CHANNEL_DIFF(1, 2, 0x12, depth),      \
++	MCP356X_V_CHANNEL_DIFF(1, 3, 0x13, depth),      \
++	MCP356X_V_CHANNEL_DIFF(2, 3, 0x23, depth),      \
++	MCP356X_V_CHANNEL_DIFF(2, 0, 0x20, depth),      \
++	MCP356X_V_CHANNEL_DIFF(3, 0, 0x30, depth),      \
++	MCP356X_V_CHANNEL_DIFF(2, 1, 0x21, depth),      \
++	MCP356X_V_CHANNEL_DIFF(3, 1, 0x31, depth),      \
++	MCP356X_V_CHANNEL_DIFF(3, 2, 0x32, depth),      \
++	MCP356X_V_CHANNEL_DIFF(0, 4, 0x04, depth),      \
++	MCP356X_V_CHANNEL_DIFF(0, 5, 0x05, depth),      \
++	MCP356X_V_CHANNEL_DIFF(0, 6, 0x06, depth),      \
++	MCP356X_V_CHANNEL_DIFF(0, 7, 0x07, depth),      \
++	MCP356X_V_CHANNEL_DIFF(1, 4, 0x14, depth),      \
++	MCP356X_V_CHANNEL_DIFF(1, 5, 0x15, depth),      \
++	MCP356X_V_CHANNEL_DIFF(1, 6, 0x16, depth),      \
++	MCP356X_V_CHANNEL_DIFF(1, 7, 0x17, depth),      \
++	MCP356X_V_CHANNEL_DIFF(2, 4, 0x24, depth),      \
++	MCP356X_V_CHANNEL_DIFF(2, 5, 0x25, depth),      \
++	MCP356X_V_CHANNEL_DIFF(2, 6, 0x26, depth),      \
++	MCP356X_V_CHANNEL_DIFF(2, 7, 0x27, depth),      \
++	MCP356X_V_CHANNEL_DIFF(3, 4, 0x34, depth),      \
++	MCP356X_V_CHANNEL_DIFF(3, 5, 0x35, depth),      \
++	MCP356X_V_CHANNEL_DIFF(3, 6, 0x36, depth),      \
++	MCP356X_V_CHANNEL_DIFF(3, 7, 0x37, depth),      \
++	MCP356X_V_CHANNEL_DIFF(4, 5, 0x45, depth),      \
++	MCP356X_V_CHANNEL_DIFF(4, 6, 0x46, depth),      \
++	MCP356X_V_CHANNEL_DIFF(4, 7, 0x47, depth),      \
++	MCP356X_V_CHANNEL_DIFF(5, 6, 0x56, depth),      \
++	MCP356X_V_CHANNEL_DIFF(5, 7, 0x57, depth),      \
++	MCP356X_V_CHANNEL_DIFF(6, 7, 0x67, depth),      \
++	MCP356X_V_CHANNEL_DIFF(4, 0, 0x40, depth),      \
++	MCP356X_V_CHANNEL_DIFF(5, 0, 0x50, depth),      \
++	MCP356X_V_CHANNEL_DIFF(6, 0, 0x60, depth),      \
++	MCP356X_V_CHANNEL_DIFF(7, 0, 0x70, depth),      \
++	MCP356X_V_CHANNEL_DIFF(4, 1, 0x41, depth),      \
++	MCP356X_V_CHANNEL_DIFF(5, 1, 0x51, depth),      \
++	MCP356X_V_CHANNEL_DIFF(6, 1, 0x61, depth),      \
++	MCP356X_V_CHANNEL_DIFF(7, 1, 0x71, depth),      \
++	MCP356X_V_CHANNEL_DIFF(4, 2, 0x42, depth),      \
++	MCP356X_V_CHANNEL_DIFF(5, 2, 0x52, depth),      \
++	MCP356X_V_CHANNEL_DIFF(6, 2, 0x62, depth),      \
++	MCP356X_V_CHANNEL_DIFF(7, 2, 0x72, depth),      \
++	MCP356X_V_CHANNEL_DIFF(4, 3, 0x43, depth),      \
++	MCP356X_V_CHANNEL_DIFF(5, 3, 0x53, depth),      \
++	MCP356X_V_CHANNEL_DIFF(6, 3, 0x63, depth),      \
++	MCP356X_V_CHANNEL_DIFF(7, 3, 0x73, depth),      \
++	MCP356X_V_CHANNEL_DIFF(5, 4, 0x54, depth),      \
++	MCP356X_V_CHANNEL_DIFF(6, 4, 0x64, depth),      \
++	MCP356X_V_CHANNEL_DIFF(7, 4, 0x74, depth),      \
++	MCP356X_V_CHANNEL_DIFF(6, 5, 0x65, depth),      \
++	MCP356X_V_CHANNEL_DIFF(7, 5, 0x75, depth),      \
++	MCP356X_V_CHANNEL_DIFF(7, 6, 0x76, depth)       \
++}
++
++static const struct iio_chan_spec mcp3461_channels[] = MCP3561_CHANNELS(16);
++static const struct iio_chan_spec mcp3462_channels[] = MCP3562_CHANNELS(16);
++static const struct iio_chan_spec mcp3464_channels[] = MCP3564_CHANNELS(16);
++static const struct iio_chan_spec mcp3561_channels[] = MCP3561_CHANNELS(24);
++static const struct iio_chan_spec mcp3562_channels[] = MCP3562_CHANNELS(24);
++static const struct iio_chan_spec mcp3564_channels[] = MCP3564_CHANNELS(24);
++
++static const struct mcp356x_chip_info mcp356x_chip_infos_tbl[] = {
++	[mcp3461] = {
++		.channels = mcp3461_channels,
++		.num_channels = ARRAY_SIZE(mcp3461_channels),
++		.int_vref_uv = 0,
++		.has_vref = false
++	},
++	[mcp3462] = {
++		.channels = mcp3462_channels,
++		.num_channels = ARRAY_SIZE(mcp3462_channels),
++		.int_vref_uv = 0,
++		.has_vref = false
++	},
++	[mcp3464] = {
++		.channels = mcp3464_channels,
++		.num_channels = ARRAY_SIZE(mcp3464_channels),
++		.int_vref_uv = 0,
++		.has_vref = false
++	},
++	[mcp3461r] = {
++		.channels = mcp3461_channels,
++		.num_channels = ARRAY_SIZE(mcp3461_channels),
++		.int_vref_uv = MCP356XR_INT_VREF_MV,
++		.has_vref = true
++	},
++	[mcp3462r] = {
++		.channels = mcp3462_channels,
++		.num_channels = ARRAY_SIZE(mcp3462_channels),
++		.int_vref_uv = MCP356XR_INT_VREF_MV,
++		.has_vref = true
++	},
++	[mcp3464r] = {
++		.channels = mcp3464_channels,
++		.num_channels = ARRAY_SIZE(mcp3464_channels),
++		.int_vref_uv = MCP356XR_INT_VREF_MV,
++		.has_vref = true
++	},
++	[mcp3561] = {
++		.channels = mcp3561_channels,
++		.num_channels = ARRAY_SIZE(mcp3561_channels),
++		.int_vref_uv = 0,
++		.has_vref = false
++	},
++	[mcp3562] = {
++		.channels = mcp3562_channels,
++		.num_channels = ARRAY_SIZE(mcp3562_channels),
++		.int_vref_uv = 0,
++		.has_vref = false
++	},
++	[mcp3564] = {
++		.channels = mcp3564_channels,
++		.num_channels = ARRAY_SIZE(mcp3564_channels),
++		.int_vref_uv = 0,
++		.has_vref = false
++	},
++	[mcp3561r] = {
++		.channels = mcp3561_channels,
++		.num_channels = ARRAY_SIZE(mcp3561_channels),
++		.int_vref_uv = MCP356XR_INT_VREF_MV,
++		.has_vref = true
++	},
++	[mcp3562r] = {
++		.channels = mcp3562_channels,
++		.num_channels = ARRAY_SIZE(mcp3562_channels),
++		.int_vref_uv = MCP356XR_INT_VREF_MV,
++		.has_vref = true
++	},
++	[mcp3564r] = {
++		.channels = mcp3564_channels,
++		.num_channels = ARRAY_SIZE(mcp3564_channels),
++		.int_vref_uv = MCP356XR_INT_VREF_MV,
++		.has_vref = true
++	},
++};
++
++static int mcp356x_read_single_value(struct iio_dev *indio_dev,
++				     struct iio_chan_spec const *channel,
++				     int *val)
++{
++	int ret;
++	int tmp;
++	struct mcp356x_state *adc = iio_priv(indio_dev);
++	int timeout = 0;
++
++	/* Configure MUX register with the requested channel */
++	ret = mcp356x_write(adc, MCP356X_MUX, channel->address, 1);
++	if (ret < 0) {
++		dev_err(&indio_dev->dev, "Failed to configure MUX register\n");
++		return ret;
++	}
++
++	/* Conversion-Start via Write-CMD to CONFIG0[1:0] = ADC_MODE[1:0] = 11 */
++	ret = mcp356x_update(adc, MCP356X_CONFIG0, MCP356X_ADC_MODE_MASK,
++			     MCP356X_ADC_CONVERSION_MODE, 1);
++	if (ret < 0) {
++		dev_err(&indio_dev->dev,
++			"Failed to configure CONFIG0 register\n");
++		return ret;
++	}
++
++	do {
++		/*
++		 * Just wait 1 ms.
++		 */
++		mdelay(1);
++
++		/* Read STATUS register */
++		ret = mcp356x_read(adc, MCP356X_IRQ, &tmp, 1);
++		if (ret < 0)
++			return ret;
++
++		timeout++;
++	} while ((tmp & MCP356X_DATA_READY_MASK) &&
++		 (timeout < MCP356X_DATA_READY_TIMEOUT));
++
++	if (tmp & MCP356X_DATA_READY_MASK) {
++		/* failing to finish conversion */
++		ret = -EBUSY;
++	} else {
++		ret = mcp356x_read(adc, MCP356X_ADCDATA, &tmp, 4);
++
++		if (ret < 0)
++			return ret;
++		*val = tmp;
++	}
++	return ret;
++}
++
++static int mcp356x_read_avail(struct iio_dev *indio_dev,
++			      struct iio_chan_spec const *channel,
++			      const int **vals, int *type,
++			      int *length, long mask)
++{
++	switch (mask) {
++	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
++		*type = IIO_VAL_INT;
++		*vals = mcp356x_oversampling_avail;
++		*length = ARRAY_SIZE(mcp356x_oversampling_avail);
++		return IIO_AVAIL_LIST;
++	case IIO_CHAN_INFO_HARDWAREGAIN:
++		*type = IIO_VAL_FRACTIONAL;
++		*length = ARRAY_SIZE(mcp356x_hwgain_frac);
++		*vals = mcp356x_hwgain_frac;
++		return IIO_AVAIL_LIST;
++	case IIO_CHAN_INFO_CALIBBIAS:
++		*vals = mcp356x_calibbias;
++		*type = IIO_VAL_INT;
++		return IIO_AVAIL_RANGE;
++	case IIO_CHAN_INFO_CALIBSCALE:
++		*vals = mcp356x_calibscale;
++		*type = IIO_VAL_INT;
++		return IIO_AVAIL_RANGE;
++	default:
++		return -EINVAL;
++	}
++}
++
++static int mcp356x_read_raw(struct iio_dev *indio_dev,
++			    struct iio_chan_spec const *channel,
++			    int *val, int *val2, long mask)
++{
++	struct mcp356x_state *adc = iio_priv(indio_dev);
++	int ret = -EINVAL;
++
++	mutex_lock(&adc->lock);
++
++	switch (mask) {
++	case IIO_CHAN_INFO_RAW:
++		ret = mcp356x_read_single_value(indio_dev, channel, val);
++		if (ret < 0)
++			goto out;
++		ret = IIO_VAL_INT;
++		break;
++	case IIO_CHAN_INFO_SCALE:
++		*val = adc->vref_mv;
++		*val2 = channel->scan_type.realbits - 1;
++		ret = IIO_VAL_FRACTIONAL_LOG2;
++		break;
++	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
++		*val = mcp356x_oversampling_avail[adc->oversampling];
++		ret = IIO_VAL_INT;
++		break;
++	case IIO_CHAN_INFO_HARDWAREGAIN:
++		*val = mcp356x_hwgain_frac[2 * adc->hwgain];
++		*val2 = mcp356x_hwgain_frac[(2 * adc->hwgain) + 1];
++		ret = IIO_VAL_FRACTIONAL;
++		break;
++	case IIO_CHAN_INFO_CALIBBIAS:
++		*val = adc->calibbias;
++		ret = IIO_VAL_INT;
++		break;
++	case IIO_CHAN_INFO_CALIBSCALE:
++		*val = adc->calibscale;
++		ret = IIO_VAL_INT;
++		break;
++	default:
++		ret = -EINVAL;
++	}
++
++out:
++	mutex_unlock(&adc->lock);
++	return ret;
++}
++
++static int mcp356x_write_raw(struct iio_dev *indio_dev,
++			     struct iio_chan_spec const *channel, int val,
++			     int val2, long mask)
++{
++	struct mcp356x_state *adc = iio_priv(indio_dev);
++	int tmp;
++	int ret = -EINVAL;
++
++	mutex_lock(&adc->lock);
++	switch (mask) {
++	case IIO_CHAN_INFO_CALIBBIAS:
++		if (val < mcp356x_calibbias[0] && val > mcp356x_calibbias[2])
++			goto out;
++
++		adc->calibbias = val;
++		ret = mcp356x_write(adc, MCP356X_OFFSETCAL, val, 3);
++		break;
++	case IIO_CHAN_INFO_CALIBSCALE:
++		if (val < mcp356x_calibbias[0] && val > mcp356x_calibbias[2])
++			goto out;
++
++		adc->calibscale = val;
++		ret = mcp356x_write(adc, MCP356X_GAINCAL, val, 3);
++		break;
++	case IIO_CHAN_INFO_OVERSAMPLING_RATIO:
++		if (val < 0)
++			goto out;
++
++		adc->oversampling = find_closest(val, mcp356x_oversampling_avail,
++						 ARRAY_SIZE(mcp356x_oversampling_avail));
++
++		dev_info(&adc->spi->dev,
++			 "IIO_CHAN_INFO_OVERSAMPLING_RATIO index %d\n",
++			 adc->oversampling);
++
++		/* Update Oversampling in CONFIG1 */
++		ret = mcp356x_update(adc, MCP356X_CONFIG1, MCP356X_OVERSAMPLING_RATIO_MASK,
++				     (adc->oversampling << MCP356X_OVERSAMPLING_RATIO_SHIFT),
++				     1);
++		if (ret < 0) {
++			dev_err(&indio_dev->dev,
++				"Failed to configure CONFIG1 register\n");
++			goto out;
++		}
++
++		break;
++	case IIO_CHAN_INFO_HARDWAREGAIN:
++		/* calculate gain from read values */
++		tmp = ((val * 1000000) + val2) / 1000;
++		if (tmp < 1 || tmp > MAX_HWGAIN_x1000)
++			goto out;
++
++		adc->hwgain = find_closest(tmp, mcp356x_hwgain,
++					   ARRAY_SIZE(mcp356x_hwgain));
++
++		dev_info(&adc->spi->dev,
++			 "IIO_CHAN_INFO_HARDWAREGAIN Gain:%d; index %d\n",
++			 tmp, adc->hwgain);
++
++		/* Update GAIN in CONFIG2[5:3] -> GAIN[2:0]*/
++		ret = mcp356x_update(adc, MCP356X_CONFIG2, MCP356X_HARDWARE_GAIN_MASK,
++				     (adc->hwgain << MCP356X_HARDWARE_GAIN_SHIFT), 1);
++		if (ret < 0) {
++			dev_err(&indio_dev->dev,
++				"Failed to configure CONFIG0 register\n");
++			goto out;
++		}
++
++		break;
++	}
++
++out:
++	mutex_unlock(&adc->lock);
++	return ret;
++}
++
++static const struct iio_info mcp356x_info = {
++	.read_raw = mcp356x_read_raw,
++	.read_avail = mcp356x_read_avail,
++	.write_raw = mcp356x_write_raw,
++	.attrs = &mcp356x_attribute_group,
++};
++
++static int mcp356x_config(struct mcp356x_state *adc,
++			  struct device_node *of_node)
++{
++	int ret = 0;
++	unsigned int tmp;
++
++	dev_info(&adc->spi->dev, "%s: Start config...\n", __func__);
++
++	of_property_read_u32(of_node, "microchip,device-addr", &adc->dev_addr);
++	if (adc->dev_addr > 3) {
++		dev_err(&adc->spi->dev,
++			"invalid device address (%i). Must be in range 0-3.\n",
++			adc->dev_addr);
++		return -EINVAL;
++	}
++
++	dev_info(&adc->spi->dev, "use device address %i\n", adc->dev_addr);
++
++	ret = mcp356x_read(adc, MCP356X_RESERVED_E, &tmp, 2);
++
++	if (ret == 0) {
++		switch (tmp & MCP356X_HW_ID_MASK) {
++		case MCP3461_HW_ID:
++			dev_info(&adc->spi->dev, "Found MCP3461 chip\n");
++			break;
++		case MCP3462_HW_ID:
++			dev_info(&adc->spi->dev, "Found MCP3462 chip\n");
++			break;
++		case MCP3464_HW_ID:
++			dev_info(&adc->spi->dev, "Found MCP3464 chip\n");
++			break;
++		case MCP3561_HW_ID:
++			dev_info(&adc->spi->dev, "Found MCP3561 chip\n");
++			break;
++		case MCP3562_HW_ID:
++			dev_info(&adc->spi->dev, "Found MCP3562 chip\n");
++			break;
++		case MCP3564_HW_ID:
++			dev_info(&adc->spi->dev, "Found MCP3564 chip\n");
++			break;
++		default:
++			dev_info(&adc->spi->dev,
++				 "Unknown chip found (0x%x)\n", tmp);
++			ret = -EINVAL;
++			goto end_config;
++		}
++	}
++
++	/* test code to read hardcoded values from registers */
++	ret = mcp356x_read(adc, MCP356X_CONFIG0, &tmp, 1);
++	dev_info(&adc->spi->dev, "MCP356X_CONFIG0 0x%x\n", tmp);
++
++	ret = mcp356x_read(adc, MCP356X_RESERVED_B, &tmp, 3);
++	dev_info(&adc->spi->dev, "MCP356X_RESERVED_B 0x%x\n", tmp);
++
++	ret = mcp356x_read(adc, MCP356X_RESERVED_C, &tmp, 1);
++	dev_info(&adc->spi->dev, "MCP356X_RESERVED_C 0x%x\n", tmp);
++
++	ret = mcp356x_read(adc, MCP356X_LOCK, &tmp, 1);
++	dev_info(&adc->spi->dev, "MCP356X_LOCK 0x%x\n", tmp);
++
++	ret = mcp356x_read(adc, MCP356X_IRQ, &tmp, 1);
++	dev_info(&adc->spi->dev, "MCP356X_IRQ 0x%x\n", tmp);
++
++	/* Write IRQ register to 0x03 */
++	ret = mcp356x_write(adc, MCP356X_IRQ, 0x00000003, 1);
++
++	/* Device Full Reset Fast Command */
++	ret = mcp356x_fast_cmd(adc, MCP356X_FULL_RESET_CMD);
++
++	/* wait 1ms for after full reset */
++	mdelay(1);
++
++	/* GAINCAL --> Disabled.
++	 * Default value is GAINCAL = 0x00800000; which provides a gain of 1x
++	 */
++	ret = mcp356x_write(adc, MCP356X_GAINCAL, 0x00800000, 3);
++	adc->calibscale = 0x00800000;
++
++	/* OFFSETCAL --> 0 Counts of Offset Cancellation
++	 * (Measured offset is negative).
++	 * OFFSETCAL = 0x0
++	 */
++	ret = mcp356x_write(adc, MCP356X_OFFSETCAL, 0x00000000, 3);
++
++	/* TIMER --> Disabled.
++	 * TIMER = 0x00000000
++	 */
++	ret = mcp356x_write(adc, MCP356X_TIMER, 0x00000000, 3);
++
++	/* SCAN --> Disabled.
++	 * SCAN = 0x00000000
++	 */
++	ret = mcp356x_write(adc, MCP356X_SCAN, 0x00000000, 3);
++
++	/* MUX --> VIN+ = CH0, VIN- = CH1 --> (0b00000001).
++	 * MUX = 0x00000001
++	 */
++	ret = mcp356x_write(adc, MCP356X_MUX, 0x00000001, 1);
++
++	/* IRQ --> IRQ Mode = Hi-Z IRQ Output  --> (0b00000011).
++	 * IRQ = 0x00000003
++	 */
++	ret = mcp356x_write(adc, MCP356X_IRQ, 0x00000003, 1);
++
++	/* CONFIG3
++	 * Conv. Mod = One-Shot/Standby,
++	 * FORMAT = 32-bit (right justified data): SGN extension + ADC data,
++	 * CRC_FORMAT = 16b, CRC-COM = Disabled,
++	 * OFFSETCAL = Enabled, GAINCAL = Enabled --> (10100011).
++	 * CONFIG3 = 0x000000A3
++	 *
++	 */
++	ret = mcp356x_write(adc, MCP356X_CONFIG3, 0x000000A3, 1);
++
++	/* CONFIG2 --> BOOST = 1x, GAIN = 1x, AZ_MUX = 1 --> (0b10001101).
++	 * CONFIG2 = 0x0000008D
++	 */
++	ret = mcp356x_write(adc, MCP356X_CONFIG2, 0x0000008D, 1);
++	adc->hwgain = 0x01;
++	adc->auto_zeroing_mux = true;
++	adc->auto_zeroing_ref = false;
++	adc->currentboost_mode = MCP356X_BOOST_CURRENT_x1_00;
++
++	/* CONFIG1 --> AMCLK = MCLK, OSR = 98304 --> (0b00111100).
++	 * CONFIG1 = 0x0000003C
++	 */
++	ret = mcp356x_write(adc, MCP356X_CONFIG1, 0x0000003C, 1);
++	adc->oversampling = 0x0F;
++
++	if (!adc->vref) {
++		/* CONFIG0 --> VREF_SEL = Internal Voltage Reference 2.4v
++		 * CLK_SEL = INTOSC w/o CLKOUT, CS_SEL = No Bias,
++		 * ADC_MODE = Standby Mode --> (0b11100010).
++		 * CONFIG0 = 0x000000E2
++		 */
++		ret = mcp356x_write(adc, MCP356X_CONFIG0, 0x000000E2, 1);
++
++		dev_info(&adc->spi->dev, "%s: Using internal Vref\n",
++			 __func__);
++		adc->vref_mv = MCP356XR_INT_VREF_MV;
++
++	} else {
++		/* CONFIG0 --> CLK_SEL = INTOSC w/o CLKOUT, CS_SEL = No Bias,
++		 * ADC_MODE = Standby Mode --> (0b01100010).
++		 * CONFIG0 = 0x000000E2
++		 */
++		ret = mcp356x_write(adc, MCP356X_CONFIG0, 0x00000062, 1);
++	}
++	adc->currentbias_mode = MCP356X_CS_SEL_0_0_uA;
++
++end_config:
++	return ret;
++}
++
++static int mcp356x_probe(struct spi_device *spi)
++{
++	int ret, device_index;
++	struct iio_dev *indio_dev;
++	struct mcp356x_state *adc;
++
++	indio_dev = devm_iio_device_alloc(&spi->dev, sizeof(*adc));
++	if (!indio_dev) {
++		dev_err(&indio_dev->dev, "Can't allocate iio device\n");
++		return -ENOMEM;
++	}
++
++	adc = iio_priv(indio_dev);
++	adc->spi = spi;
++
++	dev_info(&adc->spi->dev, "%s: probe(spi = 0x%p)\n", __func__, spi);
++
++	adc->vref = devm_regulator_get_optional(&adc->spi->dev, "vref");
++	if (IS_ERR(adc->vref)) {
++		if (PTR_ERR(adc->vref) == -ENODEV) {
++			adc->vref = NULL;
++			dev_info(&adc->spi->dev, "%s: Using internal Vref\n",
++				 __func__);
++		} else {
++			dev_err(&adc->spi->dev,
++				"failed to get regulator (%ld)\n",
++				PTR_ERR(adc->vref));
++			return PTR_ERR(adc->vref);
++		}
++	} else {
++		ret = regulator_enable(adc->vref);
++		if (ret)
++			goto error_disable_reg;
++
++		dev_info(&adc->spi->dev, "%s: Using External Vref\n",
++			 __func__);
++
++		ret = regulator_get_voltage(adc->vref);
++		if (ret < 0) {
++			dev_err(&spi->dev,
++				"Failed to read vref regulator: %d\n",
++				ret);
++			goto error_disable_reg;
++		}
++
++		adc->vref_mv = ret / 1000;
++	}
++
++	spi_set_drvdata(spi, indio_dev);
++	device_index = spi_get_device_id(spi)->driver_data;
++	adc->chip_info = &mcp356x_chip_infos_tbl[device_index];
++
++	adc->mcp356x_info.read_raw = mcp356x_read_raw;
++	adc->mcp356x_info.write_raw = mcp356x_write_raw;
++	adc->mcp356x_info.read_avail = mcp356x_read_avail;
++
++	ret = mcp356x_prep_custom_attributes(adc, indio_dev);
++	if (ret < 0) {
++		dev_err(&adc->spi->dev,
++			"Can't configure custom attributes for MCP356X device\n");
++		return ret;
++	}
++
++	indio_dev->name = spi_get_device_id(spi)->name;
++	indio_dev->modes = INDIO_DIRECT_MODE;
++	indio_dev->info = &adc->mcp356x_info;
++
++	indio_dev->channels = adc->chip_info->channels;
++	indio_dev->num_channels = adc->chip_info->num_channels;
++	indio_dev->masklength = adc->chip_info->num_channels - 1;
++
++	/* initialize the chip access mutex */
++	mutex_init(&adc->lock);
++
++	/* Do any chip specific initialization, e.g:
++	 * read/write some registers
++	 * enable/disable certain channels
++	 * change the sampling rate to the requested value
++	 */
++	ret = mcp356x_config(adc, spi->dev.of_node);
++	if (ret < 0) {
++		dev_err(&adc->spi->dev, "Can't configure MCP356X device\n");
++		return ret;
++	}
++
++	dev_info(&adc->spi->dev, "%s: Vref (mV): %d\n", __func__, adc->vref_mv);
++
++	ret = iio_device_register(indio_dev);
++	if (ret < 0) {
++		dev_err(&adc->spi->dev, "Can't register IIO device\n");
++		goto error_disable_reg;
++	}
++
++	return ret;
++
++error_disable_reg:
++	if (adc->vref)
++		regulator_disable(adc->vref);
++
++	return ret;
++}
++
++static int mcp356x_remove(struct spi_device *spi)
++{
++	struct iio_dev *indio_dev;
++	struct mcp356x_state *adc;
++
++	indio_dev = spi_get_drvdata(spi);
++	adc = iio_priv(indio_dev);
++
++	dev_info(&indio_dev->dev, "%s: remove (spi = 0x%p)\n", __func__, spi);
++
++	kfree(adc->mcp356x_info.attrs->attrs);
++	kfree(adc->mcp356x_info.attrs);
++
++	iio_device_unregister(indio_dev);
++	if (adc->vref)
++		regulator_disable(adc->vref);
++
++	return 0;
++}
++
++#ifdef CONFIG_ACPI
++static const struct acpi_device_id mcp356x_acpi_match[] = {
++	{"MCHP3564", 0},
++	{ },
++};
++MODULE_DEVICE_TABLE(acpi, mcp356x_acpi_match);
++#endif
++
++static struct spi_driver mcp356x_driver = {
++	.driver = {
++		.name = "mcp356x",
++		.of_match_table = mcp356x_dt_ids,
++		.acpi_match_table = ACPI_PTR(mcp356x_acpi_match),
++	},
++	.probe = mcp356x_probe,
++	.remove = mcp356x_remove,
++	.id_table = mcp356x_id,
++};
++
++module_spi_driver(mcp356x_driver);
++
++MODULE_AUTHOR("Marius Cristea <marius.cristea@microchip.com>");
++MODULE_DESCRIPTION("Microchip MCP346x/MCP346xR and MCP356x/MCP346xR ADCs");
++MODULE_LICENSE("GPL v2");
++MODULE_VERSION("0.1.0");
+-- 
+2.25.1
+
